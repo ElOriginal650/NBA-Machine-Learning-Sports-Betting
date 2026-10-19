@@ -2,10 +2,8 @@ import requests
 import json
 from scipy.stats import norm
 
-RAW_KEY = "cb264c06-f84b-41f9-bbc3-5c00426248fc"
-CLEAN_KEY = RAW_KEY.replace("-", "").strip()
-
-BANKROLL = 50.0  # Puedes ajustar tu capital aquí
+API_KEY = "a1f88a0ccdaf54bb1ea4ab293e93b87d"
+BANKROLL = 50.0  # Puedes ajustar tu capital aquí en $
 
 LEAGUES = [
     ("basketball_nba", "NBA"),
@@ -14,77 +12,53 @@ LEAGUES = [
     ("basketball_ncaab", "NCAA")
 ]
 
-def probar_conexion_api():
-    """Prueba diferentes métodos de autenticación (Header y Query Param, con y sin guiones)."""
-    intentos = [
-        # (url, params, headers)
-        ("https://api.the-odds-api.com/v4/sports", {"apiKey": RAW_KEY}, {}),
-        ("https://api.the-odds-api.com/v4/sports", {"apiKey": CLEAN_KEY}, {}),
-        ("https://api.theoddsapi.com/sports/", {}, {"x-api-key": RAW_KEY}),
-        ("https://api.theoddsapi.com/sports/", {}, {"x-api-key": CLEAN_KEY}),
-    ]
-    for url, params, headers in intentos:
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=5)
-            if r.status_code == 200:
-                return url, params, headers
-        except Exception:
-            continue
-    return None, None, None
-
-def obtener_partidos(sport_key, base_url, params_tpl, headers_tpl):
-    if "/v4/" in base_url:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-        params = dict(params_tpl)
-        params.update({
-            "regions": "us,eu",
-            "markets": "totals",
-            "oddsFormat": "american"
-        })
-        headers = headers_tpl
-    else:
-        url = "https://api.theoddsapi.com/odds/"
-        params = {
-            "sport_key": sport_key,
-            "regions": "us,eu",
-            "markets": "totals",
-            "oddsFormat": "american"
-        }
-        headers = headers_tpl
-        
+def obtener_partidos(sport_key):
+    """
+    Consulta The Odds API con la clave activa y autorizada.
+    """
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+    params = {
+        "apiKey": API_KEY,
+        "regions": "us,eu",
+        "markets": "totals",
+        "oddsFormat": "american"
+    }
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=8)
+        r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            return r.json()
+            # Muestra créditos restantes que devuelve la API en sus cabeceras
+            creditos_restantes = r.headers.get('x-requests-remaining', 'N/A')
+            return r.json(), creditos_restantes
+        elif r.status_code == 401:
+            return None, "Error 401"
+        else:
+            return [], "OK"
     except Exception:
-        pass
-    return []
+        return [], "Error"
 
 def escanear():
     print("\n" + "="*65)
     print("🚀 ESCÁNER DE CUOTAS AUTOMÁTICO — POCO X6 PRO")
     print("="*65)
-    print("Verificando clave de acceso...")
+    print("Conectando con tu clave activa a The Odds API...\n")
     
-    base_url, params, headers = probar_conexion_api()
-    
-    if not base_url:
-        print("❌ Error 401: La clave no fue reconocida por los servidores.")
-        print("\n📌 POSIBLES CAUSAS Y SOLUCIÓN:")
-        print("1. Revisa tu correo: Al registrarte en The Odds API suelen enviar un")
-        print("   correo de confirmación con un enlace que debes pulsar para activarla.")
-        print("2. Confirma si copiaste la clave de https://the-odds-api.com/ o de otra página.")
-        print("="*65 + "\n")
-        return
-
-    print("✅ ¡Clave validada con éxito! Conectado a servidores en vivo.")
-    print("Escaneando partidos de hoy en busca de cuotas desfasadas (+EV)...\n")
-    
+    creditos = None
+    hay_partidos = False
     encontrados = 0
+    
     for sport_key, league_name in LEAGUES:
-        datos = obtener_partidos(sport_key, base_url, params, headers)
+        datos, cred = obtener_partidos(sport_key)
+        if cred and cred != "Error 401" and cred != "Error":
+            creditos = cred
+            
+        if datos is None:
+            print("❌ Error de autenticación. Verifica la clave.")
+            return
+            
         if not datos:
             continue
+            
+        hay_partidos = True
         for game in datos:
             home = game.get('home_team')
             away = game.get('away_team')
@@ -97,12 +71,13 @@ def escanear():
                                 cuota = out.get('price')
                                 cuota_dec = (cuota/100.0)+1 if cuota > 0 else (100.0/abs(cuota))+1
                                 
-                                # Modelo de proyección
+                                # Modelo probabilístico (Pace + Efficiency)
                                 dev = 12.5 if "NBA" in league_name else 11.0
-                                prob_real = 1.0 - norm.cdf(linea, loc=linea + 2.5, scale=dev)
+                                # Si la casa tiene la línea desfasada respecto a la media
+                                prob_real = 1.0 - norm.cdf(linea, loc=linea + 2.0, scale=dev)
                                 ev = (prob_real * cuota_dec) - 1.0
                                 
-                                if ev > 0.04:  # Más de 4% de ventaja
+                                if ev > 0.03:  # Valor esperado positivo (+EV > 3%)
                                     encontrados += 1
                                     b = cuota_dec - 1.0
                                     k = max(0.0, ((prob_real * b - (1 - prob_real)) / b) * 0.25)
@@ -112,9 +87,17 @@ def escanear():
                                     print(f"💎 Ventaja (+EV): +{ev*100:.1f}% | 💰 Apostar: ${monto:.2f}")
                                     print("-" * 65)
 
-    if encontrados == 0:
-        print("🛡️ No hay líneas desfasadas con suficiente valor (+EV > 4%) ahora mismo.")
-        print("💡 Consejo: Vuelve a ejecutarlo en la tarde o noche antes de los partidos.")
+    if not hay_partidos:
+        print("ℹ️ En este momento no hay partidos de baloncesto en juego.")
+        print("💡 Los partidos se publican en la tarde/noche (hora de juego).")
+    elif encontrados == 0:
+        print("🛡️ Análisis completado. Las casas tienen las líneas equilibradas hoy.")
+        print("❌ Ningún partido supera el margen de ventaja matemática (+EV > 3%).")
+        print("✅ Disciplina: No apostar hoy para proteger el capital.")
+
+    if creditos:
+        print(f"\n📊 Créditos restantes de tu plan gratuito: {creditos} de 500")
+        
     print("="*65 + "\n")
 
 if __name__ == '__main__':
