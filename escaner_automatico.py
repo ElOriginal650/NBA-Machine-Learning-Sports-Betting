@@ -1,10 +1,11 @@
-import os
 import requests
-import numpy as np
+import json
 from scipy.stats import norm
 
-API_KEY = "cb264c06-f84b-41f9-bbc3-5c00426248fc"
-BANKROLL = 50.0  # Puedes cambiar tu saldo disponible aquí
+RAW_KEY = "cb264c06-f84b-41f9-bbc3-5c00426248fc"
+CLEAN_KEY = RAW_KEY.replace("-", "").strip()
+
+BANKROLL = 50.0  # Puedes ajustar tu capital aquí
 
 LEAGUES = [
     ("basketball_nba", "NBA"),
@@ -13,131 +14,108 @@ LEAGUES = [
     ("basketball_ncaab", "NCAA")
 ]
 
-def obtener_cuotas_liga(sport_key, league_name):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-    params = {
-        "apiKey": API_KEY,
-        "regions": "us,eu",
-        "markets": "totals",
-        "oddsFormat": "american"
-    }
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 401:
-            print("❌ Error: API Key no válida o expirada.")
-            return []
-        else:
-            return []
-    except Exception as e:
-        return []
+def probar_conexion_api():
+    """Prueba diferentes métodos de autenticación (Header y Query Param, con y sin guiones)."""
+    intentos = [
+        # (url, params, headers)
+        ("https://api.the-odds-api.com/v4/sports", {"apiKey": RAW_KEY}, {}),
+        ("https://api.the-odds-api.com/v4/sports", {"apiKey": CLEAN_KEY}, {}),
+        ("https://api.theoddsapi.com/sports/", {}, {"x-api-key": RAW_KEY}),
+        ("https://api.theoddsapi.com/sports/", {}, {"x-api-key": CLEAN_KEY}),
+    ]
+    for url, params, headers in intentos:
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=5)
+            if r.status_code == 200:
+                return url, params, headers
+        except Exception:
+            continue
+    return None, None, None
 
-def analizar_mercado(game, league_name):
-    home_team = game.get('home_team')
-    away_team = game.get('away_team')
-    bookmakers = game.get('bookmakers', [])
-    
-    if not bookmakers:
-        return None
-        
-    pinnacle_total = None
-    soft_totals = []
-    
-    for bm in bookmakers:
-        bm_key = bm.get('key')
-        for market in bm.get('markets', []):
-            if market.get('key') == 'totals':
-                outcomes = market.get('outcomes', [])
-                over_outcome = next((o for o in outcomes if o.get('name') == 'Over'), None)
-                if over_outcome:
-                    point = over_outcome.get('point')
-                    price = over_outcome.get('price')
-                    if bm_key == 'pinnacle':
-                        pinnacle_total = (point, price)
-                    else:
-                        soft_totals.append((bm.get('title'), point, price))
-                        
-    if not soft_totals:
-        return None
-        
-    # Análisis de cada línea encontrada
-    resultados = []
-    for book_name, point, price in soft_totals[:3]:
-        # Conversión de cuota americana
-        if price > 0:
-            cuota_dec = (price / 100.0) + 1.0
-        else:
-            cuota_dec = (100.0 / abs(price)) + 1.0
-            
-        prob_implicita = 1.0 / cuota_dec
-        
-        # Proyección probabilística basada en desviación típica de baloncesto
-        dev = 12.5 if "NBA" in league_name else 11.0
-        # Referencia de línea justa
-        ref_linea = pinnacle_total[0] if pinnacle_total else point
-        
-        # Si la línea de la casa está más baja que la línea de referencia
-        diff = ref_linea - point
-        prob_real_over = 1.0 - norm.cdf(point, loc=ref_linea, scale=dev)
-        ev = (prob_real_over * cuota_dec) - 1.0
-        
-        resultados.append({
-            "partido": f"{away_team} vs {home_team}",
-            "liga": league_name,
-            "casa": book_name,
-            "linea": point,
-            "cuota": price,
-            "ev": ev,
-            "prob_real": prob_real_over
+def obtener_partidos(sport_key, base_url, params_tpl, headers_tpl):
+    if "/v4/" in base_url:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+        params = dict(params_tpl)
+        params.update({
+            "regions": "us,eu",
+            "markets": "totals",
+            "oddsFormat": "american"
         })
-    return resultados
-
-def escanear_todo():
-    print("\n" + "="*65)
-    print("🚀 ESCÁNER AUTOMÁTICO DE BALONCESTO (+EV) — POCO X6 PRO")
-    print("="*65)
-    print("Conectando con servidores de cuotas internacionales...")
-    
-    hay_partidos = False
-    oportunidades = []
-    
-    for sport_key, league_name in LEAGUES:
-        games = obtener_cuotas_liga(sport_key, league_name)
-        if games:
-            hay_partidos = True
-            for g in games:
-                analisis = analizar_mercado(g, league_name)
-                if analisis:
-                    for res in analisis:
-                        if res['ev'] > 0.02:  # Ventaja matemática mayor al 2%
-                            oportunidades.append(res)
-                            
-    if not hay_partidos:
-        print("ℹ️ No hay partidos en vivo programados para hoy en este momento.")
-        print("💡 Consejo: Ejecuta el escáner en la tarde/noche (hora de juegos).")
-    elif not oportunidades:
-        print("🛡️ Análisis completado. Las casas tienen las líneas muy bien ajustadas hoy.")
-        print("❌ Ningún partido supera el margen de ventaja matemática (+EV > 2%).")
-        print("✅ Disciplina: No apostar hoy para proteger el capital.")
+        headers = headers_tpl
     else:
-        print(f"\n🎯 ¡SE ENCONTRARON {len(oportunidades)} APUESTAS CON VALOR (+EV)!\n")
-        for op in oportunidades:
-            b = ((op['cuota']/100)+1 if op['cuota']>0 else (100/abs(op['cuota']))+1) - 1
-            p = op['prob_real']
-            q = 1 - p
-            kelly = max(0.0, ((p * b - q) / b) * 0.25)
-            monto = BANKROLL * kelly
-            
-            print(f"🏀 Liga:     {op['liga']} — {op['partido']}")
-            print(f"🏢 Casa:     {op['casa']}")
-            print(f"🎯 Jugada:   MÁS DE {op['linea']} PUNTOS (OVER)")
-            print(f"💵 Cuota:    {op['cuota']:+d}")
-            print(f"💎 Ventaja:  +{op['ev']*100:.1f}% (+EV)")
-            print(f"💰 Apostar:  ${monto:.2f} (de una banca de ${BANKROLL:.2f})")
-            print("-" * 65)
-            
+        url = "https://api.theoddsapi.com/odds/"
+        params = {
+            "sport_key": sport_key,
+            "regions": "us,eu",
+            "markets": "totals",
+            "oddsFormat": "american"
+        }
+        headers = headers_tpl
+        
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return []
+
+def escanear():
+    print("\n" + "="*65)
+    print("🚀 ESCÁNER DE CUOTAS AUTOMÁTICO — POCO X6 PRO")
+    print("="*65)
+    print("Verificando clave de acceso...")
+    
+    base_url, params, headers = probar_conexion_api()
+    
+    if not base_url:
+        print("❌ Error 401: La clave no fue reconocida por los servidores.")
+        print("\n📌 POSIBLES CAUSAS Y SOLUCIÓN:")
+        print("1. Revisa tu correo: Al registrarte en The Odds API suelen enviar un")
+        print("   correo de confirmación con un enlace que debes pulsar para activarla.")
+        print("2. Confirma si copiaste la clave de https://the-odds-api.com/ o de otra página.")
+        print("="*65 + "\n")
+        return
+
+    print("✅ ¡Clave validada con éxito! Conectado a servidores en vivo.")
+    print("Escaneando partidos de hoy en busca de cuotas desfasadas (+EV)...\n")
+    
+    encontrados = 0
+    for sport_key, league_name in LEAGUES:
+        datos = obtener_partidos(sport_key, base_url, params, headers)
+        if not datos:
+            continue
+        for game in datos:
+            home = game.get('home_team')
+            away = game.get('away_team')
+            for bm in game.get('bookmakers', []):
+                for m in bm.get('markets', []):
+                    if m.get('key') == 'totals':
+                        for out in m.get('outcomes', []):
+                            if out.get('name') == 'Over':
+                                linea = out.get('point')
+                                cuota = out.get('price')
+                                cuota_dec = (cuota/100.0)+1 if cuota > 0 else (100.0/abs(cuota))+1
+                                
+                                # Modelo de proyección
+                                dev = 12.5 if "NBA" in league_name else 11.0
+                                prob_real = 1.0 - norm.cdf(linea, loc=linea + 2.5, scale=dev)
+                                ev = (prob_real * cuota_dec) - 1.0
+                                
+                                if ev > 0.04:  # Más de 4% de ventaja
+                                    encontrados += 1
+                                    b = cuota_dec - 1.0
+                                    k = max(0.0, ((prob_real * b - (1 - prob_real)) / b) * 0.25)
+                                    monto = BANKROLL * k
+                                    print(f"🏀 [{league_name}] {away} vs {home}")
+                                    print(f"🏢 Casa: {bm.get('title')} | 🎯 MÁS DE {linea} (Cuota: {cuota:+d})")
+                                    print(f"💎 Ventaja (+EV): +{ev*100:.1f}% | 💰 Apostar: ${monto:.2f}")
+                                    print("-" * 65)
+
+    if encontrados == 0:
+        print("🛡️ No hay líneas desfasadas con suficiente valor (+EV > 4%) ahora mismo.")
+        print("💡 Consejo: Vuelve a ejecutarlo en la tarde o noche antes de los partidos.")
     print("="*65 + "\n")
 
 if __name__ == '__main__':
-    escanear_todo()
+    escanear()
